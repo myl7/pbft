@@ -1,9 +1,20 @@
 // Copyright (c) 2022 myl7
 // SPDX-License-Identifier: Apache-2.0
 
+// All msg types should be safe to copy by value.
+// This may affect the type choices of Op and Result.
+// When working on arrays in these msg types, the package would ensure immutability.
 package pkg
 
-// <REQUEST,o,t,c>_{\sigma_c}
+// <>_{\sigma}
+type WithSig[T Request | PrePrepare | Prepare | Commit | Reply] struct {
+	// <>
+	Body T
+	// \sigma, signature
+	Sig []byte
+}
+
+// <REQUEST,o,t,c>
 type Request struct {
 	// o, operation
 	Op any
@@ -11,11 +22,9 @@ type Request struct {
 	Timestamp int64
 	// c
 	Client string
-	// \sigma_c, signature
-	Sig []byte
 }
 
-// <PRE-PREPARE,v,n,d>_{\sigma_p}
+// <PRE-PREPARE,v,n,d>
 type PrePrepare struct {
 	// v
 	View int
@@ -23,18 +32,16 @@ type PrePrepare struct {
 	Seq int
 	// d, request digest
 	Digest []byte
-	// \sigma_p
-	Sig []byte
 }
 
 // <<PRE-PREPARE,v,n,d>_{\sigma_p},m>
 type PrePrepareMsg struct {
-	PrePrepare
+	PP WithSig[PrePrepare]
 	// m, request
-	Req Request
+	Req WithSig[Request]
 }
 
-// <PREPARE,v,n,d,i>_{\sigma_i}
+// <PREPARE,v,n,d,i>
 type Prepare struct {
 	// v
 	View int
@@ -44,11 +51,9 @@ type Prepare struct {
 	Digest []byte
 	// i
 	Replica int
-	// \sigma_i
-	Sig []byte
 }
 
-// <COMMIT,v,n,D(m),i>_{\sigma_i}
+// <COMMIT,v,n,D(m),i>
 type Commit struct {
 	// v
 	View int
@@ -58,11 +63,9 @@ type Commit struct {
 	Replica int
 	// D(m), digest of request m
 	Digest []byte
-	// \sigma_i
-	Sig []byte
 }
 
-// <REPLY,v,t,c,i,r>_{\sigma_i}
+// <REPLY,v,t,c,i,r>
 type Reply struct {
 	// v
 	View int
@@ -74,6 +77,4 @@ type Reply struct {
 	Replica int
 	// r
 	Result any
-	// \sigma_i
-	Sig []byte
 }
