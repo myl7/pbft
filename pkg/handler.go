@@ -28,7 +28,7 @@ type Handler struct {
 	// Indexed by client
 	LatestTimestampMap     map[string]int64
 	LatestTimestampMapLock sync.Mutex
-	// Indexed by timestamp
+	// Indexed by client
 	LastResultMap     map[string]WithSig[Reply]
 	LastResultMapLock sync.Mutex
 	// Indexed by digest
@@ -59,10 +59,10 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 
 		// Check if result already exists
 		h.LastResultMapLock.Lock()
-		lastResult, ok := h.LastResultMap[r.Client]
-		if ok && r.Timestamp == lastResult.Body.Timestamp {
+		lastRe, ok := h.LastResultMap[r.Client]
+		if ok && r.Timestamp == lastRe.Body.Timestamp {
 			h.LastResultMapLock.Unlock()
-			h.NetReply(r.Client, lastResult)
+			h.NetReply(r.Client, lastRe)
 			return
 		}
 		h.LastResultMapLock.Unlock()
@@ -83,7 +83,7 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 	// Check if here is primary
 	primary := h.getPrimary()
 	if primary != h.ID {
-		h.NetSend(primary, r)
+		h.NetSend(primary, msg)
 		return
 	}
 
@@ -94,18 +94,27 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 	h.RequestAcceptMap[rKey] = r
 	h.RequestAcceptMapLock.Unlock()
 
-	// Gen and send pre-prepare
+	// Gen pre-prepare
 	pp := PrePrepare{
 		View:   h.View,
 		Seq:    h.Seq,
 		Digest: digestWithDigest,
 	}
+	h.Seq++
+
+	// Save pre-prepare
+	ppKey := fmt.Sprintf("%d:%d", pp.View, pp.Seq)
+	h.PrePrepareAcceptMapLock.Lock()
+	h.PrePrepareAcceptMap[ppKey] = pp
+	h.PrePrepareAcceptMapLock.Unlock()
+
+	// Send pre-prepare
 	ppDigest := h.Hash(pp)
 	ppSiged := WithSig[PrePrepare]{
 		Body: pp,
 		Sig:  h.PubkeySign(ppDigest, h.Privkey),
 	}
-	ppMsg := &PrePrepareMsg{
+	ppMsg := PrePrepareMsg{
 		PP:  ppSiged,
 		Req: msg,
 	}
@@ -215,7 +224,7 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		// Exclude duplicate replica
 		found := false
 		for _, replica := range counter.Replicas {
-			if replica == h.ID {
+			if replica == p.Replica {
 				found = true
 				break
 			}
@@ -277,7 +286,7 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	if ok {
 		found := false
 		for _, replica := range counter.Replicas {
-			if replica == h.ID {
+			if replica == c.Replica {
 				found = true
 				break
 			}
@@ -309,24 +318,24 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 		nextState, res := h.Transform(h.State, req.Op)
 		h.State = nextState
 
-		r := Reply{
+		re := Reply{
 			View:      c.View,
 			Timestamp: req.Timestamp,
 			Client:    req.Client,
 			Replica:   h.ID,
 			Result:    res,
 		}
-		rSiged := WithSig[Reply]{
-			Body: r,
-			Sig:  h.PubkeySign(h.Hash(r), h.Privkey),
+		reSiged := WithSig[Reply]{
+			Body: re,
+			Sig:  h.PubkeySign(h.Hash(re), h.Privkey),
 		}
 
 		// Cache last result
 		h.LastResultMapLock.Lock()
-		h.LastResultMap[hex.EncodeToString(c.Digest)] = rSiged
+		h.LastResultMap[re.Client] = reSiged
 		h.LastResultMapLock.Unlock()
 
-		h.NetReply(req.Client, rSiged)
+		h.NetReply(req.Client, reSiged)
 	}
 }
 
@@ -340,8 +349,11 @@ type StateMachine struct {
 }
 
 type NetFuncSet struct {
-	NetSend      func(id int, msg any)
-	NetReply     func(client string, msg any)
+	// msg would only be WithSig[Request]
+	NetSend func(id int, msg any)
+	// msg would only be WithSig[Reply]
+	NetReply func(client string, msg any)
+	// msg would only be PrePrepareMsg | WithSig[Prepare] | WithSig[Commit]
 	NetBroadcast func(id int, msg any)
 }
 
