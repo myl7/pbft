@@ -20,9 +20,7 @@ All you need to do is to create a `Handler` and use it to handle already routed 
 ## Caveats
 
 - No view change
-- No h-H sequence number range limit
-- No msg log triming
-- No checkpoint
+- No checkpoint: h-H sequence number range limit and log garbage collection
 
 ## References
 
