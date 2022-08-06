@@ -110,27 +110,27 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 
 	// Send pre-prepare
 	ppDigest := h.Hash(pp)
-	ppSiged := WithSig[PrePrepare]{
+	ppSigned := WithSig[PrePrepare]{
 		Body: pp,
 		Sig:  h.PubkeySign(ppDigest, h.Privkey),
 	}
 	ppMsg := PrePrepareMsg{
-		PP:  ppSiged,
+		PP:  ppSigned,
 		Req: msg,
 	}
 	h.NetBroadcast(h.ID, ppMsg)
 }
 
 func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
-	ppSiged := msg.PP
-	pp := ppSiged.Body
-	rSiged := msg.Req
-	r := rSiged.Body
+	ppSigned := msg.PP
+	pp := ppSigned.Body
+	rSigned := msg.Req
+	r := rSigned.Body
 
 	// Check if request sig is valid
 	clientPubkey := h.GetClientPubkey(r.Client)
 	reqDigest := h.Hash(r)
-	err := h.PubkeyVerify(rSiged.Sig, reqDigest, clientPubkey)
+	err := h.PubkeyVerify(rSigned.Sig, reqDigest, clientPubkey)
 	if err != nil {
 		log.Printf("error: request sig invalid when handling pre-prepare: client = %s, err = %s\n", r.Client, err)
 		return
@@ -139,15 +139,15 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 	// Check if sig is valid
 	pubkey := h.ReplicaPubkeys[h.getPrimary()]
 	digest := h.Hash(pp)
-	err = h.PubkeyVerify(ppSiged.Sig, digest, pubkey)
+	err = h.PubkeyVerify(ppSigned.Sig, digest, pubkey)
 	if err != nil {
 		log.Printf("error: pre-prepare sig invalid: seq = %d, err = %s\n", pp.Seq, err)
 		return
 	}
 
 	// Check if digest matches
-	rSigedDigest := h.Hash(rSiged)
-	if !bytes.Equal(pp.Digest, rSigedDigest) {
+	rSignedDigest := h.Hash(rSigned)
+	if !bytes.Equal(pp.Digest, rSignedDigest) {
 		log.Printf("error: pre-prepare reqDigest invalid: seq = %d\n", pp.Seq)
 		return
 	}
@@ -187,13 +187,13 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 		Replica: h.ID,
 	}
 	pDigest := h.Hash(p)
-	pSiged := WithSig[Prepare]{
+	pSigned := WithSig[Prepare]{
 		Body: p,
 		Sig:  h.PubkeySign(pDigest, h.Privkey),
 	}
 	// Handle self prepare
-	h.HandlePrepare(pSiged)
-	h.NetBroadcast(h.ID, pSiged)
+	h.HandlePrepare(pSigned)
+	h.NetBroadcast(h.ID, pSigned)
 }
 
 func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
@@ -250,12 +250,12 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 			Replica: h.ID,
 		}
 		cDigest := h.Hash(c)
-		cSiged := WithSig[Commit]{
+		cSigned := WithSig[Commit]{
 			Body: c,
 			Sig:  h.PubkeySign(cDigest, h.Privkey),
 		}
-		h.HandleCommit(cSiged)
-		h.NetBroadcast(h.ID, cSiged)
+		h.HandleCommit(cSigned)
+		h.NetBroadcast(h.ID, cSigned)
 	}
 }
 
@@ -325,17 +325,17 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 			Replica:   h.ID,
 			Result:    res,
 		}
-		reSiged := WithSig[Reply]{
+		reSigned := WithSig[Reply]{
 			Body: re,
 			Sig:  h.PubkeySign(h.Hash(re), h.Privkey),
 		}
 
 		// Cache last result
 		h.LastResultMapLock.Lock()
-		h.LastResultMap[re.Client] = reSiged
+		h.LastResultMap[re.Client] = reSigned
 		h.LastResultMapLock.Unlock()
 
-		h.NetReply(req.Client, reSiged)
+		h.NetReply(req.Client, reSigned)
 	}
 }
 
