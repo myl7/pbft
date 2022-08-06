@@ -25,25 +25,7 @@ type Handler struct {
 	Seq     int
 	View    int
 	Privkey []byte
-	// Indexed by client
-	LatestTimestampMap     map[string]int64
-	LatestTimestampMapLock sync.Mutex
-	// Indexed by client
-	LastResultMap     map[string]WithSig[Reply]
-	LastResultMapLock sync.Mutex
-	// Indexed by digest
-	RequestAcceptMap     map[string]Request
-	RequestAcceptMapLock sync.Mutex
-	// Indexed by view + seq
-	PrePrepareAcceptMap     map[string]PrePrepare
-	PrePrepareAcceptMapLock sync.Mutex
-	// Indexed by view + seq + digest so accessible via pre-prepare + request. Used to check prepared
-	PrepareAcceptMap     map[string]ReplicaCounter[Prepare]
-	PrepareAcceptMapLock sync.Mutex
-	// The index and value are the same as PrepareAcceptMap,
-	// but in HandleCommit this is used together with PrepareAcceptMap to check committed-local
-	CommitLocalAcceptMap     map[string]ReplicaCounter[Commit]
-	CommitLocalAcceptMapLock sync.Mutex
+	LogMapSet
 }
 
 func (h *Handler) HandleRequest(msg WithSig[Request]) {
@@ -375,4 +357,38 @@ type PubkeyFuncSet struct {
 type ReplicaCounter[T Prepare | Commit] struct {
 	Data     T
 	Replicas []int
+}
+
+// Here the log is in the meaning of the paper
+type LogMapSet struct {
+	// Indexed by client
+	LatestTimestampMap     map[string]int64
+	LatestTimestampMapLock sync.Mutex
+	// Indexed by client
+	LastResultMap     map[string]WithSig[Reply]
+	LastResultMapLock sync.Mutex
+	// Indexed by digest
+	RequestAcceptMap     map[string]Request
+	RequestAcceptMapLock sync.Mutex
+	// Indexed by view + seq
+	PrePrepareAcceptMap     map[string]PrePrepare
+	PrePrepareAcceptMapLock sync.Mutex
+	// Indexed by view + seq + digest so accessible via pre-prepare + request. Used to check prepared
+	PrepareAcceptMap     map[string]ReplicaCounter[Prepare]
+	PrepareAcceptMapLock sync.Mutex
+	// The index and value are the same as PrepareAcceptMap,
+	// but in HandleCommit this is used together with PrepareAcceptMap to check committed-local
+	CommitLocalAcceptMap     map[string]ReplicaCounter[Commit]
+	CommitLocalAcceptMapLock sync.Mutex
+}
+
+func NewLogMapSet() *LogMapSet {
+	return &LogMapSet{
+		LatestTimestampMap:   make(map[string]int64),
+		LastResultMap:        make(map[string]WithSig[Reply]),
+		RequestAcceptMap:     make(map[string]Request),
+		PrePrepareAcceptMap:  make(map[string]PrePrepare),
+		PrepareAcceptMap:     make(map[string]ReplicaCounter[Prepare]),
+		CommitLocalAcceptMap: make(map[string]ReplicaCounter[Commit]),
+	}
 }

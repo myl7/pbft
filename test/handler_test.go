@@ -80,18 +80,13 @@ func TestPBFT(t *testing.T) {
 					return nil
 				},
 			},
-			F:                    1,
-			N:                    4,
-			ID:                   i,
-			Seq:                  0,
-			View:                 0,
-			Privkey:              nil,
-			LatestTimestampMap:   make(map[string]int64),
-			LastResultMap:        make(map[string]pkg.WithSig[pkg.Reply]),
-			RequestAcceptMap:     make(map[string]pkg.Request),
-			PrePrepareAcceptMap:  make(map[string]pkg.PrePrepare),
-			PrepareAcceptMap:     make(map[string]pkg.ReplicaCounter[pkg.Prepare]),
-			CommitLocalAcceptMap: make(map[string]pkg.ReplicaCounter[pkg.Commit]),
+			F:         1,
+			N:         4,
+			ID:        i,
+			Seq:       0,
+			View:      0,
+			Privkey:   nil,
+			LogMapSet: *pkg.NewLogMapSet(),
 		}
 	}
 
