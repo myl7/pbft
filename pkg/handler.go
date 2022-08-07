@@ -351,22 +351,30 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 		panic(err)
 	}
 
-	if !rows.Next() {
-		tx.Rollback()
-		log.Printf("error: commit no prepare: seq = %d\n", c.Seq)
-		return
-	}
-
 	var cReplicasS string
 	var committedLocal int
 	var prepared int
-	err = rows.Scan(&cReplicasS, &committedLocal, &prepared)
-	if err != nil {
-		tx.Rollback()
-		panic(err)
-	}
+	if rows.Next() {
+		err = rows.Scan(&cReplicasS, &committedLocal, &prepared)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
 
-	rows.Close()
+		rows.Close()
+	} else {
+		log.Printf("warning: commit no prepare: seq = %d\n", c.Seq)
+
+		_, err := tx.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", c.View, c.Seq, c.Digest, "", "", 0, h.DBSer(c), "", 0)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
+		cReplicasS = ""
+		committedLocal = 0
+		prepared = 0
+	}
 
 	cReplicas := splitStrToInt(cReplicasS, ",")
 
