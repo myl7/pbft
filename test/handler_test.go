@@ -102,13 +102,13 @@ func TestPBFT(t *testing.T) {
 				case msg := <-chanMap[i]:
 					switch msg.(type) {
 					case pkg.WithSig[pkg.Request]:
-						nodes[i].HandleRequest(msg.(pkg.WithSig[pkg.Request]))
+						go nodes[i].HandleRequest(msg.(pkg.WithSig[pkg.Request]))
 					case pkg.PrePrepareMsg:
-						nodes[i].HandlePrePrepare(msg.(pkg.PrePrepareMsg))
+						go nodes[i].HandlePrePrepare(msg.(pkg.PrePrepareMsg))
 					case pkg.WithSig[pkg.Prepare]:
-						nodes[i].HandlePrepare(msg.(pkg.WithSig[pkg.Prepare]))
+						go nodes[i].HandlePrepare(msg.(pkg.WithSig[pkg.Prepare]))
 					case pkg.WithSig[pkg.Commit]:
-						nodes[i].HandleCommit(msg.(pkg.WithSig[pkg.Commit]))
+						go nodes[i].HandleCommit(msg.(pkg.WithSig[pkg.Commit]))
 					default:
 						panic(fmt.Errorf("Unknown msg type: %T", msg))
 					}

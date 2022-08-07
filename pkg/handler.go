@@ -27,6 +27,7 @@ type Handler struct {
 	LogMapSet
 	DB *sql.DB
 	DBSerdeFuncSet
+	checkPreparedAndCommitedLocalLock sync.Mutex
 }
 
 func (h *Handler) HandleRequest(msg WithSig[Request]) {
@@ -196,7 +197,7 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 		Sig:  h.PubkeySign(pDigest, h.Privkey),
 	}
 	// Handle self prepare
-	h.HandlePrepare(pSigned)
+	go h.HandlePrepare(pSigned)
 	h.NetBroadcast(h.ID, pSigned)
 }
 
@@ -221,21 +222,29 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 	// TODO: Check seq between h and H
 
 	// Check if prepare is enough
+	h.checkPreparedAndCommitedLocalLock.Lock()
+	defer h.checkPreparedAndCommitedLocalLock.Unlock()
+
 	tx, err := h.DB.Begin()
 	if err != nil {
 		panic(err)
 	}
 
-	rows, err := tx.Query("SELECT `prepare_replicas` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
+	rows, err := tx.Query("SELECT `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
 	if err != nil {
 		tx.Rollback()
 		panic(err)
 	}
 
 	var pReplicas []int
+	var prepared int
+	var cReplicas []int
+	var cB []byte
+	var committedLocal int
 	if rows.Next() {
 		var pReplicasS string
-		err = rows.Scan(&pReplicasS)
+		var cReplicasS string
+		err = rows.Scan(&pReplicasS, &prepared, &cB, &cReplicasS, &committedLocal)
 		if err != nil {
 			tx.Rollback()
 			panic(err)
@@ -244,6 +253,7 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		rows.Close()
 
 		pReplicas = splitStrToInt(pReplicasS, ",")
+		cReplicas = splitStrToInt(cReplicasS, ",")
 
 		// Exclude duplicate replica
 		if indexOf(pReplicas, p.Replica) == -1 {
@@ -260,17 +270,21 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		pReplicas = []int{h.ID}
 		pReplicaS := joinIntToStr(pReplicas, ",")
 
-		_, err = tx.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `commit`, `commit_replicas`) VALUES (?, ?, ?, ?, ?, ?, ?)", p.View, p.Seq, p.Digest, h.DBSer(p), pReplicaS, "", "")
+		_, err = tx.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", p.View, p.Seq, p.Digest, h.DBSer(p), pReplicaS, 0, "", "", 0)
 		if err != nil {
 			tx.Rollback()
 			panic(err)
 		}
 	}
 
-	tx.Commit()
-
 	// If prepared
-	if len(pReplicas) == 2*h.F+1 {
+	if len(pReplicas) >= 2*h.F && prepared == 0 {
+		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `prepared` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
 		// Gen and send commit
 		c := Commit{
 			View:    p.View,
@@ -283,9 +297,24 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 			Body: c,
 			Sig:  h.PubkeySign(cDigest, h.Privkey),
 		}
-		h.HandleCommit(cSigned)
-		h.NetBroadcast(h.ID, cSigned)
+		go h.HandleCommit(cSigned)
+		go h.NetBroadcast(h.ID, cSigned)
 	}
+
+	// If committed-local
+	if len(cReplicas) >= 2*h.F+1 && committedLocal == 0 && len(pReplicas) >= 2*h.F {
+		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `committed_local` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
+		var c Commit
+		h.DBDe(cB, &c)
+		go h.OnCommittedLocal(c)
+	}
+
+	tx.Commit()
 }
 
 func (h *Handler) HandleCommit(msg WithSig[Commit]) {
@@ -309,12 +338,14 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	// TODO: Check seq between h and H
 
 	// Check if commit is enough
+	h.checkPreparedAndCommitedLocalLock.Lock()
+	defer h.checkPreparedAndCommitedLocalLock.Unlock()
 	tx, err := h.DB.Begin()
 	if err != nil {
 		panic(err)
 	}
 
-	rows, err := tx.Query("SELECT `commit_replicas`, `prepare_replicas` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
+	rows, err := tx.Query("SELECT `commit_replicas`, `committed_local`, `prepared` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
 	if err != nil {
 		tx.Rollback()
 		panic(err)
@@ -322,13 +353,14 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 
 	if !rows.Next() {
 		tx.Rollback()
-		log.Printf("error: commit not prepared: seq = %d\n", c.Seq)
+		log.Printf("error: commit no prepare: seq = %d\n", c.Seq)
 		return
 	}
 
 	var cReplicasS string
-	var pReplicasS string
-	err = rows.Scan(&cReplicasS, &pReplicasS)
+	var committedLocal int
+	var prepared int
+	err = rows.Scan(&cReplicasS, &committedLocal, &prepared)
 	if err != nil {
 		tx.Rollback()
 		panic(err)
@@ -337,13 +369,6 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	rows.Close()
 
 	cReplicas := splitStrToInt(cReplicasS, ",")
-	pReplicas := splitStrToInt(pReplicasS, ",")
-
-	if len(pReplicas) < 2*h.F+1 {
-		tx.Rollback()
-		log.Printf("error: commit not prepared: seq = %d\n", c.Seq)
-		return
-	}
 
 	if len(cReplicas) == 0 {
 		cReplicas = []int{h.ID}
@@ -367,55 +392,65 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 		}
 	}
 
-	tx.Commit()
-
 	// If committed-local
-	if len(cReplicas) == 2*h.F+1 {
-		// Fetch request for operation
-		rows, err := h.DB.Query("SELECT `request` FROM `requests` WHERE `digest` = ?", c.Digest)
+	if len(cReplicas) >= 2*h.F+1 && committedLocal == 0 && prepared > 0 {
+		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `committed_local` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
 		if err != nil {
+			tx.Rollback()
 			panic(err)
 		}
 
-		if !rows.Next() {
-			log.Printf("error: commit request not found: seq = %d\n", c.Seq)
-			return
-		}
-
-		var rB []byte
-		err = rows.Scan(&rB)
-		if err != nil {
-			panic(err)
-		}
-
-		rows.Close()
-
-		var r Request
-		h.DBDe(rB, &r)
-
-		// Tansform state for state machine
-		nextState, res := h.Transform(h.State, r.Op)
-		h.State = nextState
-
-		re := Reply{
-			View:      c.View,
-			Timestamp: r.Timestamp,
-			Client:    r.Client,
-			Replica:   h.ID,
-			Result:    res,
-		}
-		reSigned := WithSig[Reply]{
-			Body: re,
-			Sig:  h.PubkeySign(h.Hash(re), h.Privkey),
-		}
-
-		// Cache last result
-		h.LastResultMapLock.Lock()
-		h.LastResultMap[re.Client] = reSigned
-		h.LastResultMapLock.Unlock()
-
-		h.NetReply(r.Client, reSigned)
+		go h.OnCommittedLocal(c)
 	}
+
+	tx.Commit()
+}
+
+func (h *Handler) OnCommittedLocal(c Commit) {
+	// Fetch request for operation
+	rows, err := h.DB.Query("SELECT `request` FROM `requests` WHERE `digest` = ?", c.Digest)
+	if err != nil {
+		panic(err)
+	}
+
+	if !rows.Next() {
+		log.Printf("error: commit request not found: seq = %d\n", c.Seq)
+		return
+	}
+
+	var rB []byte
+	err = rows.Scan(&rB)
+	if err != nil {
+		panic(err)
+	}
+
+	rows.Close()
+
+	var r Request
+	h.DBDe(rB, &r)
+
+	// Tansform state for state machine
+	nextState, res := h.Transform(h.State, r.Op)
+	h.State = nextState
+
+	re := Reply{
+		View:      c.View,
+		Timestamp: r.Timestamp,
+		Client:    r.Client,
+		Replica:   h.ID,
+		Result:    res,
+	}
+	reSigned := WithSig[Reply]{
+		Body: re,
+		Sig:  h.PubkeySign(h.Hash(re), h.Privkey),
+	}
+
+	// Cache last result
+	h.LastResultMapLock.Lock()
+	h.LastResultMap[re.Client] = reSigned
+	h.LastResultMapLock.Unlock()
+
+	h.NetReply(r.Client, reSigned)
 }
 
 func (h *Handler) getPrimary() int {
