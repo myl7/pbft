@@ -1,10 +1,9 @@
 package test
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"database/sql"
 	"fmt"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -31,13 +30,22 @@ func TestPBFT(t *testing.T) {
 	privkeys := make([][]byte, N+CN)
 	pubkeys := make([][]byte, N+CN)
 	for i := 0; i < N+CN; i++ {
-		key, err := rsa.GenerateKey(rand.Reader, 4096)
+		privkeyB, err := os.ReadFile(fmt.Sprintf("data/rsa/%d_priv.pem", i))
 		if err != nil {
 			panic(err)
 		}
 
-		privkeys[i] = pkg.SerRSAPrivkey(key)
-		pubkeys[i] = pkg.SerRSAPubkey(&key.PublicKey)
+		privkey := pkg.DeRSAPrivkey(privkeyB)
+
+		pubkeyB, err := os.ReadFile(fmt.Sprintf("data/rsa/%d_pub.pem", i))
+		if err != nil {
+			panic(err)
+		}
+
+		pubkey := pkg.DeRSAPubkey(pubkeyB)
+
+		privkeys[i] = pkg.SerRSAPrivkey(privkey)
+		pubkeys[i] = pkg.SerRSAPubkey(pubkey)
 	}
 
 	nodes := make([]*pkg.Handler, N)
