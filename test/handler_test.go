@@ -2,12 +2,14 @@ package test
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"testing"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/myl7/pbft/pkg"
 )
 
@@ -22,16 +24,16 @@ func TestPBFT(t *testing.T) {
 		chanMap[i] = make(chan any, 100)
 	}
 
-	const (
-		msgTypeRequest = iota
-		msgTypePrePrepare
-		msgTypePrepare
-		msgTypeCommit
-		msgTypeReply
-	)
-
 	nodes := make([]*pkg.Handler, 4)
 	for i := 0; i < 4; i++ {
+		db, err := sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			panic(err)
+		}
+
+		db.SetMaxOpenConns(1)
+		pkg.InitDB(db)
+
 		nodes[i] = &pkg.Handler{
 			StateMachine: pkg.StateMachine{
 				State: 0,
@@ -80,13 +82,15 @@ func TestPBFT(t *testing.T) {
 					return nil
 				},
 			},
-			F:         1,
-			N:         4,
-			ID:        i,
-			Seq:       0,
-			View:      0,
-			Privkey:   nil,
-			LogMapSet: *pkg.NewLogMapSet(),
+			F:              1,
+			N:              4,
+			ID:             i,
+			Seq:            0,
+			View:           0,
+			Privkey:        nil,
+			LogMapSet:      *pkg.NewLogMapSetDefault(),
+			DB:             db,
+			DBSerdeFuncSet: *pkg.NewDBSerdeFuncSetDefault(),
 		}
 	}
 

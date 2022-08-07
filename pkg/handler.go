@@ -5,10 +5,11 @@ package pkg
 
 import (
 	"bytes"
-	"encoding/hex"
-	"fmt"
+	"database/sql"
 	"log"
 	"sync"
+
+	"golang.org/x/exp/slices"
 )
 
 type Handler struct {
@@ -26,6 +27,8 @@ type Handler struct {
 	View    int
 	Privkey []byte
 	LogMapSet
+	DB *sql.DB
+	DBSerdeFuncSet
 }
 
 func (h *Handler) HandleRequest(msg WithSig[Request]) {
@@ -71,10 +74,7 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 
 	// Save request
 	digestWithDigest := h.Hash(msg)
-	rKey := hex.EncodeToString(digestWithDigest)
-	h.RequestAcceptMapLock.Lock()
-	h.RequestAcceptMap[rKey] = r
-	h.RequestAcceptMapLock.Unlock()
+	h.DB.Exec("INSERT INTO `requests` (`digest`, `request`) VALUES (?, ?)", digestWithDigest, h.DBSer(r))
 
 	// Gen pre-prepare
 	pp := PrePrepare{
@@ -85,10 +85,7 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 	h.Seq++
 
 	// Save pre-prepare
-	ppKey := fmt.Sprintf("%d:%d", pp.View, pp.Seq)
-	h.PrePrepareAcceptMapLock.Lock()
-	h.PrePrepareAcceptMap[ppKey] = pp
-	h.PrePrepareAcceptMapLock.Unlock()
+	h.DB.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
 
 	// Send pre-prepare
 	ppDigest := h.Hash(pp)
@@ -141,23 +138,50 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 	}
 
 	// Check and save pre-prepare
-	key := fmt.Sprintf("%d:%d", pp.View, pp.Seq)
-	h.PrePrepareAcceptMapLock.Lock()
-	oldPP, ok := h.PrePrepareAcceptMap[key]
-	if ok {
+	tx, err := h.DB.Begin()
+	if err != nil {
+		panic(err)
+	}
+
+	rows, err := tx.Query("SELECT `pre_prepare` FROM `pre_prepares` WHERE `view` = ? AND `seq` = ?", pp.View, pp.Seq)
+	if err != nil {
+		tx.Rollback()
+		panic(err)
+	}
+
+	if rows.Next() {
+		var oldPPB []byte
+		err = rows.Scan(&oldPPB)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
+		rows.Close()
+
+		var oldPP PrePrepare
+		h.DBDe(oldPPB, &oldPP)
 		if !bytes.Equal(oldPP.Digest, pp.Digest) {
 			log.Printf("error: pre-prepare msg accept conflict: seq = %d\n", pp.Seq)
 		}
+
+		tx.Rollback()
 		return
 	}
-	h.PrePrepareAcceptMap[key] = pp
-	h.PrePrepareAcceptMapLock.Unlock()
+
+	_, err = tx.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
+	if err != nil {
+		tx.Rollback()
+		panic(err)
+	}
+
+	tx.Commit()
 
 	// Save request
-	rKey := hex.EncodeToString(pp.Digest)
-	h.RequestAcceptMapLock.Lock()
-	h.RequestAcceptMap[rKey] = r
-	h.RequestAcceptMapLock.Unlock()
+	_, err = h.DB.Exec("INSERT INTO `requests` (`digest`, `request`) VALUES (?, ?)", pp.Digest, h.DBSer(r))
+	if err != nil {
+		panic(err)
+	}
 
 	// TODO: Check seq between h and H
 
@@ -199,31 +223,56 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 	// TODO: Check seq between h and H
 
 	// Check if prepare is enough
-	pKey := fmt.Sprintf("%d:%d:%s", p.View, p.Seq, hex.EncodeToString(p.Digest))
-	h.PrepareAcceptMapLock.Lock()
-	counter, ok := h.PrepareAcceptMap[pKey]
-	if ok {
+	tx, err := h.DB.Begin()
+	if err != nil {
+		panic(err)
+	}
+
+	rows, err := tx.Query("SELECT `prepare_replicas` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
+	if err != nil {
+		tx.Rollback()
+		panic(err)
+	}
+
+	var pReplicas []int
+	if rows.Next() {
+		var pReplicasS string
+		err = rows.Scan(&pReplicasS)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
+		rows.Close()
+
+		pReplicas = splitStrToInt(pReplicasS, ",")
+
 		// Exclude duplicate replica
-		found := false
-		for _, replica := range counter.Replicas {
-			if replica == p.Replica {
-				found = true
-				break
+		if slices.Index(pReplicas, p.Replica) == -1 {
+			pReplicas = append(pReplicas, h.ID)
+			pReplicasS = joinIntToStr(pReplicas, ",")
+
+			_, err = tx.Exec("UPDATE `prepares_with_commits` SET `prepare_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", pReplicasS, p.View, p.Seq, p.Digest)
+			if err != nil {
+				tx.Rollback()
+				panic(err)
 			}
 		}
-
-		if !found {
-			counter.Replicas = append(counter.Replicas, h.ID)
-		}
 	} else {
-		counter.Replicas = []int{h.ID}
-		counter.Data = p
+		pReplicas = []int{h.ID}
+		pReplicaS := joinIntToStr(pReplicas, ",")
+
+		_, err = tx.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `commit`, `commit_replicas`) VALUES (?, ?, ?, ?, ?, ?, ?)", p.View, p.Seq, p.Digest, h.DBSer(p), pReplicaS, "", "")
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
 	}
-	h.PrepareAcceptMap[pKey] = counter
-	h.PrepareAcceptMapLock.Unlock()
+
+	tx.Commit()
 
 	// If prepared
-	if len(counter.Replicas) == 2*h.F+1 {
+	if len(pReplicas) == 2*h.F+1 {
 		// Gen and send commit
 		c := Commit{
 			View:    p.View,
@@ -262,48 +311,98 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	// TODO: Check seq between h and H
 
 	// Check if commit is enough
-	key := fmt.Sprintf("%d:%d:%s", c.View, c.Seq, hex.EncodeToString(c.Digest))
-	h.CommitLocalAcceptMapLock.Lock()
-	counter, ok := h.CommitLocalAcceptMap[key]
-	if ok {
-		found := false
-		for _, replica := range counter.Replicas {
-			if replica == c.Replica {
-				found = true
-				break
-			}
-		}
-		if !found {
-			counter.Replicas = append(counter.Replicas, h.ID)
+	tx, err := h.DB.Begin()
+	if err != nil {
+		panic(err)
+	}
+
+	rows, err := tx.Query("SELECT `commit_replicas`, `prepare_replicas` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
+	if err != nil {
+		tx.Rollback()
+		panic(err)
+	}
+
+	if !rows.Next() {
+		tx.Rollback()
+		log.Printf("error: commit not prepared: seq = %d\n", c.Seq)
+		return
+	}
+
+	var cReplicasS string
+	var pReplicasS string
+	err = rows.Scan(&cReplicasS, &pReplicasS)
+	if err != nil {
+		tx.Rollback()
+		panic(err)
+	}
+
+	rows.Close()
+
+	cReplicas := splitStrToInt(cReplicasS, ",")
+	pReplicas := splitStrToInt(pReplicasS, ",")
+
+	if len(pReplicas) < 2*h.F+1 {
+		tx.Rollback()
+		log.Printf("error: commit not prepared: seq = %d\n", c.Seq)
+		return
+	}
+
+	if len(cReplicas) == 0 {
+		cReplicas = []int{h.ID}
+		cReplicasS = joinIntToStr(cReplicas, ",")
+
+		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `commit` = ?, `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", h.DBSer(c), cReplicasS, c.View, c.Seq, c.Digest)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
 		}
 	} else {
-		counter.Replicas = []int{h.ID}
-		counter.Data = c
-	}
-	h.CommitLocalAcceptMap[key] = counter
-	h.CommitLocalAcceptMapLock.Unlock()
+		if slices.Index(cReplicas, c.Replica) == -1 {
+			cReplicas = append(cReplicas, h.ID)
+			cReplicasS = joinIntToStr(cReplicas, ",")
 
-	// Prepare prepared for checking
-	pKey := fmt.Sprintf("%d:%d:%s", c.View, c.Seq, hex.EncodeToString(c.Digest))
-	h.PrepareAcceptMapLock.Lock()
-	pCounter := h.PrepareAcceptMap[pKey]
-	h.PrepareAcceptMapLock.Unlock()
+			_, err = tx.Exec("UPDATE `prepares_with_commits` SET `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", cReplicasS, c.View, c.Seq, c.Digest)
+			if err != nil {
+				tx.Rollback()
+				panic(err)
+			}
+		}
+	}
+
+	tx.Commit()
 
 	// If committed-local
-	if len(counter.Replicas) == 2*h.F+1 && len(pCounter.Replicas) >= 2*h.F+1 {
+	if len(cReplicas) == 2*h.F+1 {
 		// Fetch request for operation
-		h.RequestAcceptMapLock.Lock()
-		req, _ := h.RequestAcceptMap[hex.EncodeToString(c.Digest)]
-		h.RequestAcceptMapLock.Unlock()
+		rows, err := h.DB.Query("SELECT `request` FROM `requests` WHERE `digest` = ?", c.Digest)
+		if err != nil {
+			panic(err)
+		}
+
+		if !rows.Next() {
+			log.Printf("error: commit request not found: seq = %d\n", c.Seq)
+			return
+		}
+
+		var rB []byte
+		err = rows.Scan(&rB)
+		if err != nil {
+			panic(err)
+		}
+
+		rows.Close()
+
+		var r Request
+		h.DBDe(rB, &r)
 
 		// Tansform state for state machine
-		nextState, res := h.Transform(h.State, req.Op)
+		nextState, res := h.Transform(h.State, r.Op)
 		h.State = nextState
 
 		re := Reply{
 			View:      c.View,
-			Timestamp: req.Timestamp,
-			Client:    req.Client,
+			Timestamp: r.Timestamp,
+			Client:    r.Client,
 			Replica:   h.ID,
 			Result:    res,
 		}
@@ -317,7 +416,7 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 		h.LastResultMap[re.Client] = reSigned
 		h.LastResultMapLock.Unlock()
 
-		h.NetReply(req.Client, reSigned)
+		h.NetReply(r.Client, reSigned)
 	}
 }
 
@@ -354,11 +453,6 @@ type PubkeyFuncSet struct {
 	PubkeyVerify func(sig []byte, digest []byte, pubkey []byte) error
 }
 
-type ReplicaCounter[T Prepare | Commit] struct {
-	Data     T
-	Replicas []int
-}
-
 // Here the log is in the meaning of the paper
 type LogMapSet struct {
 	// Indexed by client
@@ -367,28 +461,23 @@ type LogMapSet struct {
 	// Indexed by client
 	LastResultMap     map[string]WithSig[Reply]
 	LastResultMapLock sync.Mutex
-	// Indexed by digest
-	RequestAcceptMap     map[string]Request
-	RequestAcceptMapLock sync.Mutex
-	// Indexed by view + seq
-	PrePrepareAcceptMap     map[string]PrePrepare
-	PrePrepareAcceptMapLock sync.Mutex
-	// Indexed by view + seq + digest so accessible via pre-prepare + request. Used to check prepared
-	PrepareAcceptMap     map[string]ReplicaCounter[Prepare]
-	PrepareAcceptMapLock sync.Mutex
-	// The index and value are the same as PrepareAcceptMap,
-	// but in HandleCommit this is used together with PrepareAcceptMap to check committed-local
-	CommitLocalAcceptMap     map[string]ReplicaCounter[Commit]
-	CommitLocalAcceptMapLock sync.Mutex
 }
 
-func NewLogMapSet() *LogMapSet {
+func NewLogMapSetDefault() *LogMapSet {
 	return &LogMapSet{
-		LatestTimestampMap:   make(map[string]int64),
-		LastResultMap:        make(map[string]WithSig[Reply]),
-		RequestAcceptMap:     make(map[string]Request),
-		PrePrepareAcceptMap:  make(map[string]PrePrepare),
-		PrepareAcceptMap:     make(map[string]ReplicaCounter[Prepare]),
-		CommitLocalAcceptMap: make(map[string]ReplicaCounter[Commit]),
+		LatestTimestampMap: make(map[string]int64),
+		LastResultMap:      make(map[string]WithSig[Reply]),
+	}
+}
+
+type DBSerdeFuncSet struct {
+	DBSer func(obj any) (bin []byte)
+	DBDe  func(bin []byte, ptr any)
+}
+
+func NewDBSerdeFuncSetDefault() *DBSerdeFuncSet {
+	return &DBSerdeFuncSet{
+		DBSer: GobEnc,
+		DBDe:  GobDec,
 	}
 }
