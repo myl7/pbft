@@ -8,8 +8,6 @@ import (
 	"database/sql"
 	"log"
 	"sync"
-
-	"golang.org/x/exp/slices"
 )
 
 type Handler struct {
@@ -248,7 +246,7 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		pReplicas = splitStrToInt(pReplicasS, ",")
 
 		// Exclude duplicate replica
-		if slices.Index(pReplicas, p.Replica) == -1 {
+		if indexOf(pReplicas, p.Replica) == -1 {
 			pReplicas = append(pReplicas, h.ID)
 			pReplicasS = joinIntToStr(pReplicas, ",")
 
@@ -357,7 +355,7 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 			panic(err)
 		}
 	} else {
-		if slices.Index(cReplicas, c.Replica) == -1 {
+		if indexOf(cReplicas, c.Replica) == -1 {
 			cReplicas = append(cReplicas, h.ID)
 			cReplicasS = joinIntToStr(cReplicas, ",")
 

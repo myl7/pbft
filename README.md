@@ -15,7 +15,8 @@ All you need to do is to create a `Handler` and use it to handle already routed 
   - No serialization code: Feel free to use JSON/gob...
   - No crypto code: Feel free to use RSA/Ed25519...
   - No hash code: Feel free to use SHA256/SHA512/SHA3...
-- Fine-grained locks other than only one mutex for the whole node
+- Database as storage
+- Zero dependencies
 
 ## Caveats
 

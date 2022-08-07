@@ -157,3 +157,14 @@ func SHA3WithGobHash(data any) []byte {
 	digest := sha512.Sum512(b)
 	return digest[:]
 }
+
+// Slice
+
+func indexOf(s []int, v int) int {
+	for i, vs := range s {
+		if v == vs {
+			return i
+		}
+	}
+	return -1
+}
