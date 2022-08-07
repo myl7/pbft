@@ -5,14 +5,14 @@ package pkg
 
 func NewDigestFuncSetDefault() *DigestFuncSet {
 	return &DigestFuncSet{
-		Hash: SHA3WithGobHash,
+		Hash: SHA512WithGobHash,
 	}
 }
 
 func NewPubkeyFuncSetDefault() *PubkeyFuncSet {
 	return &PubkeyFuncSet{
-		PubkeySign:   RSAWithSHA3512Sign,
-		PubkeyVerify: RSAWithSHA3512Verify,
+		PubkeySign:   RSAWithSHA512Sign,
+		PubkeyVerify: RSAWithSHA512Verify,
 	}
 }
 

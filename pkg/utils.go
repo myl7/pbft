@@ -81,7 +81,7 @@ func joinIntToStr(ints []int, sep string) string {
 
 // Pubkey
 
-func RSAWithSHA3512Sign(digest []byte, privkey []byte) []byte {
+func RSAWithSHA512Sign(digest []byte, privkey []byte) []byte {
 	key := DeRSAPrivkey(privkey)
 	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA512, digest)
 	if err != nil {
@@ -91,7 +91,7 @@ func RSAWithSHA3512Sign(digest []byte, privkey []byte) []byte {
 	return sig
 }
 
-func RSAWithSHA3512Verify(sig []byte, digest []byte, pubkey []byte) error {
+func RSAWithSHA512Verify(sig []byte, digest []byte, pubkey []byte) error {
 	key := DeRSAPubkey(pubkey)
 	err := rsa.VerifyPKCS1v15(key, crypto.SHA512, digest, sig)
 	if err != nil {
@@ -155,7 +155,7 @@ func DeRSAPrivkey(privkey []byte) *rsa.PrivateKey {
 
 // Hash
 
-func SHA3WithGobHash(data any) []byte {
+func SHA512WithGobHash(data any) []byte {
 	b := GobEnc(data)
 	digest := sha512.Sum512(b)
 	return digest[:]

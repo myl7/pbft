@@ -126,7 +126,7 @@ func TestPBFT(t *testing.T) {
 			Client:    "0",
 		},
 	}
-	rSiged0.Sig = pkg.RSAWithSHA3512Sign(pkg.SHA3WithGobHash(rSiged0.Body), privkeys[N+0])
+	rSiged0.Sig = pkg.RSAWithSHA512Sign(pkg.SHA512WithGobHash(rSiged0.Body), privkeys[N+0])
 	chanMap[1] <- rSiged0
 
 	for i := 0; i < N; i++ {
@@ -149,7 +149,7 @@ func TestPBFT(t *testing.T) {
 			Client:    "1",
 		},
 	}
-	rSiged1.Sig = pkg.RSAWithSHA3512Sign(pkg.SHA3WithGobHash(rSiged1.Body), privkeys[N+1])
+	rSiged1.Sig = pkg.RSAWithSHA512Sign(pkg.SHA512WithGobHash(rSiged1.Body), privkeys[N+1])
 	chanMap[0] <- rSiged1
 
 	for i := 0; i < N; i++ {
