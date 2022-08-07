@@ -1,9 +1,9 @@
 package test
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
+	"crypto/rsa"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"testing"
@@ -14,18 +14,34 @@ import (
 )
 
 func TestPBFT(t *testing.T) {
+	F := 1
+	N := 3*F + 1
+	CN := 2
+
 	kill := make(chan bool)
-	clientChanMap := make([]chan any, 2)
-	for i := 0; i < 2; i++ {
+	clientChanMap := make([]chan any, CN)
+	for i := 0; i < CN; i++ {
 		clientChanMap[i] = make(chan any, 100)
 	}
-	chanMap := make([]chan any, 4)
-	for i := 0; i < 4; i++ {
+	chanMap := make([]chan any, N)
+	for i := 0; i < N; i++ {
 		chanMap[i] = make(chan any, 100)
 	}
 
-	nodes := make([]*pkg.Handler, 4)
-	for i := 0; i < 4; i++ {
+	privkeys := make([][]byte, N+CN)
+	pubkeys := make([][]byte, N+CN)
+	for i := 0; i < N+CN; i++ {
+		key, err := rsa.GenerateKey(rand.Reader, 4096)
+		if err != nil {
+			panic(err)
+		}
+
+		privkeys[i] = pkg.SerRSAPrivkey(key)
+		pubkeys[i] = pkg.SerRSAPubkey(&key.PublicKey)
+	}
+
+	nodes := make([]*pkg.Handler, N)
+	for i := 0; i < N; i++ {
 		db, err := sql.Open("sqlite3", ":memory:")
 		if err != nil {
 			panic(err)
@@ -50,7 +66,7 @@ func TestPBFT(t *testing.T) {
 					clientChanMap[i] <- msg
 				},
 				NetBroadcast: func(id int, msg any) {
-					for i := 0; i < 4; i++ {
+					for i := 0; i < N; i++ {
 						if i != id {
 							chanMap[i] <- msg
 						}
@@ -59,42 +75,27 @@ func TestPBFT(t *testing.T) {
 			},
 			GetPubkeyFuncSet: pkg.GetPubkeyFuncSet{
 				GetClientPubkey: func(client string) []byte {
-					return nil
-				},
-				ReplicaPubkeys: make([][]byte, 4),
-			},
-			DigestFuncSet: pkg.DigestFuncSet{
-				Hash: func(data any) []byte {
-					b, err := json.Marshal(data)
+					i, err := strconv.Atoi(client)
 					if err != nil {
 						panic(err)
 					}
 
-					digest := sha256.Sum256(b)
-					return digest[:]
+					return pubkeys[i+N]
 				},
+				ReplicaPubkeys: pubkeys,
 			},
-			PubkeyFuncSet: pkg.PubkeyFuncSet{
-				PubkeySign: func(digest []byte, privkey []byte) []byte {
-					return nil
-				},
-				PubkeyVerify: func(sig []byte, digest []byte, pubkey []byte) error {
-					return nil
-				},
-			},
+			DigestFuncSet:  *pkg.NewDigestFuncSetDefault(),
+			PubkeyFuncSet:  *pkg.NewPubkeyFuncSetDefault(),
 			F:              1,
-			N:              4,
 			ID:             i,
-			Seq:            0,
-			View:           0,
-			Privkey:        nil,
-			LogMapSet:      *pkg.NewLogMapSetDefault(),
+			Privkey:        privkeys[i],
 			DB:             db,
 			DBSerdeFuncSet: *pkg.NewDBSerdeFuncSetDefault(),
 		}
+		nodes[i].Init()
 	}
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < N; i++ {
 		go func(i int) {
 			for {
 				select {
@@ -125,9 +126,10 @@ func TestPBFT(t *testing.T) {
 			Client:    "0",
 		},
 	}
+	rSiged0.Sig = pkg.RSAWithSHA3512Sign(pkg.SHA3WithGobHash(rSiged0.Body), privkeys[N+0])
 	chanMap[1] <- rSiged0
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < N; i++ {
 		select {
 		case reply := <-clientChanMap[0]:
 			reply0 := reply.(pkg.WithSig[pkg.Reply])
@@ -147,9 +149,10 @@ func TestPBFT(t *testing.T) {
 			Client:    "1",
 		},
 	}
+	rSiged1.Sig = pkg.RSAWithSHA3512Sign(pkg.SHA3WithGobHash(rSiged1.Body), privkeys[N+1])
 	chanMap[0] <- rSiged1
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < N; i++ {
 		select {
 		case reply := <-clientChanMap[1]:
 			reply1 := (reply).(pkg.WithSig[pkg.Reply])

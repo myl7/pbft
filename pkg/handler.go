@@ -463,21 +463,13 @@ type LogMapSet struct {
 	LastResultMapLock sync.Mutex
 }
 
-func NewLogMapSetDefault() *LogMapSet {
-	return &LogMapSet{
-		LatestTimestampMap: make(map[string]int64),
-		LastResultMap:      make(map[string]WithSig[Reply]),
-	}
-}
-
 type DBSerdeFuncSet struct {
 	DBSer func(obj any) (bin []byte)
 	DBDe  func(bin []byte, ptr any)
 }
 
-func NewDBSerdeFuncSetDefault() *DBSerdeFuncSet {
-	return &DBSerdeFuncSet{
-		DBSer: GobEnc,
-		DBDe:  GobDec,
-	}
+func (h *Handler) Init() {
+	h.LatestTimestampMap = make(map[string]int64)
+	h.LastResultMap = make(map[string]WithSig[Reply])
+	h.N = 3*h.F + 1
 }

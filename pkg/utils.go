@@ -2,9 +2,16 @@ package pkg
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha512"
+	"crypto/x509"
 	"database/sql"
 	_ "embed"
 	"encoding/gob"
+	"encoding/pem"
+	"errors"
 	"strconv"
 	"strings"
 )
@@ -67,4 +74,86 @@ func joinIntToStr(ints []int, sep string) string {
 		ss[i] = strconv.Itoa(n)
 	}
 	return strings.Join(ss, sep)
+}
+
+// Pubkey
+
+func RSAWithSHA3512Sign(digest []byte, privkey []byte) []byte {
+	key := DeRSAPrivkey(privkey)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA512, digest)
+	if err != nil {
+		panic(err)
+	}
+
+	return sig
+}
+
+func RSAWithSHA3512Verify(sig []byte, digest []byte, pubkey []byte) error {
+	key := DeRSAPubkey(pubkey)
+	err := rsa.VerifyPKCS1v15(key, crypto.SHA512, digest, sig)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Pubkey serde
+
+func SerRSAPubkey(pubkey *rsa.PublicKey) []byte {
+	b, err := x509.MarshalPKIXPublicKey(pubkey)
+	if err != nil {
+		panic(err)
+	}
+
+	block := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: b,
+	}
+	return pem.EncodeToMemory(block)
+}
+
+func SerRSAPrivkey(privkey *rsa.PrivateKey) []byte {
+	b := x509.MarshalPKCS1PrivateKey(privkey)
+	block := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: b,
+	}
+	return pem.EncodeToMemory(block)
+}
+
+func DeRSAPubkey(pubkey []byte) *rsa.PublicKey {
+	block, _ := pem.Decode(pubkey)
+	if block == nil {
+		panic(errors.New("invalid public key"))
+	}
+
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		panic(err)
+	}
+
+	return key.(*rsa.PublicKey)
+}
+
+func DeRSAPrivkey(privkey []byte) *rsa.PrivateKey {
+	block, _ := pem.Decode(privkey)
+	if block == nil {
+		panic(errors.New("invalid private key"))
+	}
+
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		panic(err)
+	}
+
+	return key
+}
+
+// Hash
+
+func SHA3WithGobHash(data any) []byte {
+	b := GobEnc(data)
+	digest := sha512.Sum512(b)
+	return digest[:]
 }
