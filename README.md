@@ -21,7 +21,6 @@ All you need to do is to create a `Handler` and use it to handle already routed 
 ## Caveats
 
 - No view change
-- No checkpoint: h-H sequence number range limit and log garbage collection
 
 ## References
 

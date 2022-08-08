@@ -7,7 +7,7 @@
 package pkg
 
 // <>_{\sigma}
-type WithSig[T Request | PrePrepare | Prepare | Commit | Reply] struct {
+type WithSig[T Request | PrePrepare | Prepare | Commit | Reply | Checkpoint] struct {
 	// <>
 	Body T
 	// \sigma, signature
@@ -77,4 +77,14 @@ type Reply struct {
 	Replica int
 	// r
 	Result any
+}
+
+// <CHECKPOINT,n,d,i>
+type Checkpoint struct {
+	// n
+	Seq int
+	// d
+	StateDigest []byte
+	// i
+	Replica int
 }

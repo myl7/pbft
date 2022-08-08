@@ -92,13 +92,17 @@ func TestPBFT(t *testing.T) {
 				},
 				ReplicaPubkeys: pubkeys,
 			},
-			DigestFuncSet:  *pkg.NewDigestFuncSetDefault(),
-			PubkeyFuncSet:  *pkg.NewPubkeyFuncSetDefault(),
-			F:              1,
-			ID:             i,
-			Privkey:        privkeys[i],
-			DB:             db,
-			DBSerdeFuncSet: *pkg.NewDBSerdeFuncSetDefault(),
+			DigestFuncSet:         *pkg.NewDigestFuncSetDefault(),
+			PubkeyFuncSet:         *pkg.NewPubkeyFuncSetDefault(),
+			F:                     1,
+			ID:                    i,
+			Privkey:               privkeys[i],
+			DB:                    db,
+			DBSerdeFuncSet:        *pkg.NewDBSerdeFuncSetDefault(),
+			EnableCheckpoint:      true,
+			K:                     200,
+			CheckpointSeqInterval: 100,
+			EnableLogDiscard:      false,
 		}
 		nodes[i].Init()
 	}
@@ -117,6 +121,8 @@ func TestPBFT(t *testing.T) {
 						go nodes[i].HandlePrepare(msg.(pkg.WithSig[pkg.Prepare]))
 					case pkg.WithSig[pkg.Commit]:
 						go nodes[i].HandleCommit(msg.(pkg.WithSig[pkg.Commit]))
+					case pkg.WithSig[pkg.Checkpoint]:
+						go nodes[i].HandleCheckpoint(msg.(pkg.WithSig[pkg.Checkpoint]))
 					default:
 						panic(fmt.Errorf("Unknown msg type: %T", msg))
 					}

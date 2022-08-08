@@ -19,15 +19,25 @@ type Handler struct {
 	// f
 	F int
 	// Node num in total and should be 3 * F + 1
-	N       int
-	ID      int
-	Seq     int
-	View    int
-	Privkey []byte
+	N        int
+	ID       int
+	Seq      int
+	SeqLock  sync.Mutex
+	View     int
+	ViewLock sync.RWMutex
+	Privkey  []byte
 	LogMapSet
 	DB *sql.DB
 	DBSerdeFuncSet
 	checkPreparedAndCommitedLocalLock sync.Mutex
+	EnableCheckpoint                  bool
+	HLow                              int
+	HHigh                             int
+	HLock                             sync.Mutex
+	K                                 int
+	CheckpointSeqInterval             int
+	checkCheckpointLock               sync.Mutex
+	EnableLogDiscard                  bool
 }
 
 func (h *Handler) HandleRequest(msg WithSig[Request]) {
@@ -65,23 +75,30 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 	}
 
 	// Check if here is primary
+	h.ViewLock.RLock()
 	primary := h.getPrimary()
 	if primary != h.ID {
+		h.ViewLock.RUnlock()
 		h.NetSend(primary, msg)
 		return
 	}
-
-	// Save request
-	digestWithDigest := h.Hash(msg)
-	h.DB.Exec("INSERT INTO `requests` (`digest`, `request`) VALUES (?, ?)", digestWithDigest, h.DBSer(r))
+	h.ViewLock.RUnlock()
 
 	// Gen pre-prepare
+	digestWithDigest := h.Hash(msg)
+	h.SeqLock.Lock()
+	h.ViewLock.RLock()
 	pp := PrePrepare{
 		View:   h.View,
 		Seq:    h.Seq,
 		Digest: digestWithDigest,
 	}
 	h.Seq++
+	h.ViewLock.RUnlock()
+	h.SeqLock.Unlock()
+
+	// Save request
+	h.DB.Exec("INSERT INTO `requests` (`digest`, `request`, `seq`) VALUES (?, ?, ?)", digestWithDigest, h.DBSer(r), pp.Seq)
 
 	// Save pre-prepare
 	h.DB.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
@@ -115,13 +132,16 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 	}
 
 	// Check if sig is valid
+	h.ViewLock.RLock()
 	pubkey := h.ReplicaPubkeys[h.getPrimary()]
 	digest := h.Hash(pp)
 	err = h.PubkeyVerify(ppSigned.Sig, digest, pubkey)
 	if err != nil {
+		h.ViewLock.RUnlock()
 		log.Printf("error: pre-prepare sig invalid: seq = %d, err = %s\n", pp.Seq, err)
 		return
 	}
+	h.ViewLock.RUnlock()
 
 	// Check if digest matches
 	rSignedDigest := h.Hash(rSigned)
@@ -131,9 +151,23 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 	}
 
 	// Check if view does not change
+	h.ViewLock.RLock()
 	if pp.View != h.View {
+		h.ViewLock.RUnlock()
 		log.Printf("error: pre-prepare view invalid: seq = %d\n", pp.Seq)
 		return
+	}
+	h.ViewLock.RUnlock()
+
+	// Check seq between h and H
+	if h.EnableCheckpoint {
+		h.HLock.Lock()
+		if pp.Seq < h.HLow || pp.Seq > h.HHigh {
+			h.HLock.Unlock()
+			log.Printf("error: pre-prepare seq not in [h, H]: seq = %d\n", pp.Seq)
+			return
+		}
+		h.HLock.Unlock()
 	}
 
 	// Check and save pre-prepare
@@ -177,12 +211,10 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 	tx.Commit()
 
 	// Save request
-	_, err = h.DB.Exec("INSERT INTO `requests` (`digest`, `request`) VALUES (?, ?)", pp.Digest, h.DBSer(r))
+	_, err = h.DB.Exec("INSERT INTO `requests` (`digest`, `request`, `seq`) VALUES (?, ?, ?)", pp.Digest, h.DBSer(r), pp.Seq)
 	if err != nil {
 		panic(err)
 	}
-
-	// TODO: Check seq between h and H
 
 	// Gen and send prepare
 	p := Prepare{
@@ -214,12 +246,24 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 	}
 
 	// Check if view does not change
+	h.ViewLock.RLock()
 	if p.View != h.View {
+		h.ViewLock.RUnlock()
 		log.Printf("error: prepare view invalid: seq = %d\n", p.Seq)
 		return
 	}
+	h.ViewLock.RUnlock()
 
-	// TODO: Check seq between h and H
+	// Check seq between h and H
+	if h.EnableCheckpoint {
+		h.HLock.Lock()
+		if p.Seq < h.HLow || p.Seq > h.HHigh {
+			h.HLock.Unlock()
+			log.Printf("error: prepare seq not in [h, H]: seq = %d\n", p.Seq)
+			return
+		}
+		h.HLock.Unlock()
+	}
 
 	// Check if prepare is enough
 	h.checkPreparedAndCommitedLocalLock.Lock()
@@ -330,12 +374,24 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	}
 
 	// Check if view does not change
+	h.ViewLock.RLock()
 	if c.View != h.View {
+		h.ViewLock.RUnlock()
 		log.Printf("error: commit view invalid: seq = %d\n", c.Seq)
 		return
 	}
+	h.ViewLock.RUnlock()
 
-	// TODO: Check seq between h and H
+	// Check seq between h and H
+	if h.EnableCheckpoint {
+		h.HLock.Lock()
+		if c.Seq < h.HLow || c.Seq > h.HHigh {
+			h.HLock.Unlock()
+			log.Printf("error: commit seq not in [h, H]: seq = %d\n", c.Seq)
+			return
+		}
+		h.HLock.Unlock()
+	}
 
 	// Check if commit is enough
 	h.checkPreparedAndCommitedLocalLock.Lock()
@@ -458,9 +514,121 @@ func (h *Handler) OnCommittedLocal(c Commit) {
 	h.LastResultMap[re.Client] = reSigned
 	h.LastResultMapLock.Unlock()
 
+	if h.EnableCheckpoint && c.Seq != 0 && c.Seq%h.CheckpointSeqInterval == 0 {
+		ch := Checkpoint{
+			Seq:         c.Seq,
+			StateDigest: h.Hash(h.State),
+			Replica:     h.ID,
+		}
+		go h.OnCheckpoint(ch)
+	}
+
 	h.NetReply(r.Client, reSigned)
 }
 
+func (h *Handler) HandleCheckpoint(msg WithSig[Checkpoint]) {
+	ch := msg.Body
+
+	// Check if sig is valid
+	pubkey := h.ReplicaPubkeys[ch.Replica]
+	digest := h.Hash(ch)
+	err := h.PubkeyVerify(msg.Sig, digest, pubkey)
+	if err != nil {
+		log.Printf("error: checkpoint sig invalid: seq = %d, err = %s\n", ch.Seq, err)
+		return
+	}
+
+	h.checkCheckpointLock.Lock()
+	defer h.checkCheckpointLock.Unlock()
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		panic(err)
+	}
+
+	rows, err := h.DB.Query("SELECT `replicas`, `stable` FROM `checkpoints` WHERE `seq` = ? AND `state_digest` = ?", ch.Seq, ch.StateDigest)
+	if err != nil {
+		tx.Rollback()
+		panic(err)
+	}
+
+	var replicas []int
+	var stable int
+	if rows.Next() {
+		var replicasS string
+		err = rows.Scan(&replicasS, &stable)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
+		replicas = splitStrToInt(replicasS, ",")
+
+		if indexOf(replicas, ch.Replica) == -1 {
+			replicas = append(replicas, ch.Replica)
+			replicasS = joinIntToStr(replicas, ",")
+
+			_, err = tx.Exec("UPDATE `checkpoints` SET `replicas` = ? WHERE `seq` = ? AND `state_digest` = ?", replicasS, ch.Seq, ch.StateDigest)
+			if err != nil {
+				tx.Rollback()
+				panic(err)
+			}
+		}
+	} else {
+		replicas = []int{ch.Replica}
+		_, err := h.DB.Exec("INSERT INTO `checkpoints` (`seq`, `state_digest`, `replicas`, `stable`) VALUES (?, ?, ?, ?)", ch.Seq, ch.StateDigest, "", 0)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+	}
+
+	if len(replicas) >= 2*h.F+1 && stable == 0 {
+		_, err = tx.Exec("UPDATE `checkpoints` SET `stable` = 1 WHERE `seq` = ? AND `state_digest` = ?", ch.Seq, ch.StateDigest)
+		if err != nil {
+			tx.Rollback()
+			panic(err)
+		}
+
+		go h.OnCheckpointStable(ch)
+	}
+
+	tx.Commit()
+}
+
+func (h *Handler) OnCheckpointStable(ch Checkpoint) {
+	h.HLock.Lock()
+	h.HLow = ch.Seq
+	h.HHigh = ch.Seq + h.K
+	h.HLock.Unlock()
+
+	if h.EnableLogDiscard {
+		_, err := h.DB.Exec("DELETE FROM `requests` WHERE `seq` < ?", ch.Seq)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = h.DB.Exec("DELETE FROM `pre_prepares` WHERE `seq` < ?", ch.Seq)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = h.DB.Exec("DELETE FROM `prepares_with_commits` WHERE `seq` < ?", ch.Seq)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (h *Handler) OnCheckpoint(ch Checkpoint) {
+	chSigned := WithSig[Checkpoint]{
+		Body: ch,
+		Sig:  h.PubkeySign(h.Hash(ch), h.Privkey),
+	}
+	h.NetBroadcast(h.ID, chSigned)
+}
+
+// Remember to lock ViewLock before calling
 func (h *Handler) getPrimary() int {
 	return h.View % h.N
 }
@@ -513,4 +681,6 @@ func (h *Handler) Init() {
 	h.LatestTimestampMap = make(map[string]int64)
 	h.LastResultMap = make(map[string]WithSig[Reply])
 	h.N = 3*h.F + 1
+	h.HLow = h.Seq
+	h.HHigh = h.HLow + h.K
 }

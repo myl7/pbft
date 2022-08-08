@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS `requests` (
   `digest` TEXT NOT NULL,
   `request` BLOB NOT NULL,
+  `seq` INT NOT NULL,
   PRIMARY KEY (`digest`)
 );
 CREATE TABLE IF NOT EXISTS `pre_prepares` (
@@ -22,4 +23,11 @@ CREATE TABLE IF NOT EXISTS `prepares_with_commits` (
   PRIMARY KEY (`view`, `seq`, `digest`),
   FOREIGN KEY (`view`, `seq`) REFERENCES `pre_prepares` (`view`, `seq`),
   FOREIGN KEY (`digest`) REFERENCES `requests` (`digest`)
+);
+CREATE TABLE IF NOT EXISTS `checkpoints` (
+  `seq` INT NOT NULL,
+  `state_digest` TEXT NOT NULL,
+  `replicas` TEXT NOT NULL,
+  `stable` INT NOT NULL,
+  PRIMARY KEY (`seq`, `state_digest`)
 );
