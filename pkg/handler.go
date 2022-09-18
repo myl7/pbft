@@ -29,15 +29,17 @@ type Handler struct {
 	LogMapSet
 	DB *sql.DB
 	DBSerdeFuncSet
-	checkPreparedAndCommitedLocalLock sync.Mutex
-	EnableCheckpoint                  bool
-	HLow                              int
-	HHigh                             int
-	HLock                             sync.Mutex
-	K                                 int
-	CheckpointSeqInterval             int
-	checkCheckpointLock               sync.Mutex
-	EnableLogDiscard                  bool
+	requestTableLock          sync.Mutex
+	preprepareTableLock       sync.Mutex
+	prepareAndCommitTableLock sync.Mutex
+	EnableCheckpoint          bool
+	HLow                      int
+	HHigh                     int
+	HLock                     sync.Mutex
+	K                         int
+	CheckpointSeqInterval     int
+	checkCheckpointLock       sync.Mutex
+	EnableLogDiscard          bool
 }
 
 func (h *Handler) HandleRequest(msg WithSig[Request]) {
@@ -98,10 +100,22 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 	h.SeqLock.Unlock()
 
 	// Save request
-	h.DB.Exec("INSERT INTO `requests` (`digest`, `request`, `seq`) VALUES (?, ?, ?)", digestWithDigest, h.DBSer(r), pp.Seq)
+	h.requestTableLock.Lock()
+	_, err = h.DB.Exec("INSERT INTO `requests` (`digest`, `request`, `seq`) VALUES (?, ?, ?)", digestWithDigest, h.DBSer(r), pp.Seq)
+	if err != nil {
+		h.requestTableLock.Unlock()
+		panic(err)
+	}
+	h.requestTableLock.Unlock()
 
 	// Save pre-prepare
-	h.DB.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
+	h.preprepareTableLock.Lock()
+	_, err = h.DB.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
+	if err != nil {
+		h.preprepareTableLock.Unlock()
+		panic(err)
+	}
+	h.preprepareTableLock.Unlock()
 
 	// Send pre-prepare
 	ppDigest := h.Hash(pp)
@@ -171,14 +185,11 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 	}
 
 	// Check and save pre-prepare
-	tx, err := h.DB.Begin()
-	if err != nil {
-		panic(err)
-	}
+	h.preprepareTableLock.Lock()
 
-	rows, err := tx.Query("SELECT `pre_prepare` FROM `pre_prepares` WHERE `view` = ? AND `seq` = ?", pp.View, pp.Seq)
+	rows, err := h.DB.Query("SELECT `pre_prepare` FROM `pre_prepares` WHERE `view` = ? AND `seq` = ?", pp.View, pp.Seq)
 	if err != nil {
-		tx.Rollback()
+		h.preprepareTableLock.Unlock()
 		panic(err)
 	}
 
@@ -186,7 +197,7 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 		var oldPPB []byte
 		err = rows.Scan(&oldPPB)
 		if err != nil {
-			tx.Rollback()
+			h.preprepareTableLock.Unlock()
 			panic(err)
 		}
 
@@ -198,23 +209,26 @@ func (h *Handler) HandlePrePrepare(msg PrePrepareMsg) {
 			log.Printf("error: pre-prepare msg accept conflict: seq = %d\n", pp.Seq)
 		}
 
-		tx.Rollback()
+		h.preprepareTableLock.Unlock()
 		return
 	}
 
-	_, err = tx.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
+	_, err = h.DB.Exec("INSERT INTO `pre_prepares` (`view`, `seq`, `pre_prepare`) VALUES (?, ?, ?)", pp.View, pp.Seq, h.DBSer(pp))
 	if err != nil {
-		tx.Rollback()
+		h.preprepareTableLock.Unlock()
 		panic(err)
 	}
 
-	tx.Commit()
+	h.preprepareTableLock.Unlock()
 
 	// Save request
+	h.requestTableLock.Lock()
 	_, err = h.DB.Exec("INSERT INTO `requests` (`digest`, `request`, `seq`) VALUES (?, ?, ?)", pp.Digest, h.DBSer(r), pp.Seq)
 	if err != nil {
+		h.requestTableLock.Unlock()
 		panic(err)
 	}
+	h.requestTableLock.Unlock()
 
 	// Gen and send prepare
 	p := Prepare{
@@ -266,17 +280,11 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 	}
 
 	// Check if prepare is enough
-	h.checkPreparedAndCommitedLocalLock.Lock()
-	defer h.checkPreparedAndCommitedLocalLock.Unlock()
+	h.prepareAndCommitTableLock.Lock()
+	defer h.prepareAndCommitTableLock.Unlock()
 
-	tx, err := h.DB.Begin()
+	rows, err := h.DB.Query("SELECT `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
 	if err != nil {
-		panic(err)
-	}
-
-	rows, err := tx.Query("SELECT `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
-	if err != nil {
-		tx.Rollback()
 		panic(err)
 	}
 
@@ -290,7 +298,6 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		var cReplicasS string
 		err = rows.Scan(&pReplicasS, &prepared, &cB, &cReplicasS, &committedLocal)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 
@@ -304,9 +311,8 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 			pReplicas = append(pReplicas, h.ID)
 			pReplicasS = joinIntToStr(pReplicas, ",")
 
-			_, err = tx.Exec("UPDATE `prepares_with_commits` SET `prepare_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", pReplicasS, p.View, p.Seq, p.Digest)
+			_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `prepare_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", pReplicasS, p.View, p.Seq, p.Digest)
 			if err != nil {
-				tx.Rollback()
 				panic(err)
 			}
 		}
@@ -314,18 +320,16 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		pReplicas = []int{h.ID}
 		pReplicaS := joinIntToStr(pReplicas, ",")
 
-		_, err = tx.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", p.View, p.Seq, p.Digest, h.DBSer(p), pReplicaS, 0, "", "", 0)
+		_, err = h.DB.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", p.View, p.Seq, p.Digest, h.DBSer(p), pReplicaS, 0, "", "", 0)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 	}
 
 	// If prepared
 	if len(pReplicas) >= 2*h.F && prepared == 0 {
-		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `prepared` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
+		_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `prepared` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 
@@ -347,9 +351,8 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 
 	// If committed-local
 	if len(cReplicas) >= 2*h.F+1 && committedLocal == 0 && len(pReplicas) >= 2*h.F {
-		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `committed_local` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
+		_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `committed_local` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", p.View, p.Seq, p.Digest)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 
@@ -357,8 +360,6 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 		h.DBDe(cB, &c)
 		go h.OnCommittedLocal(c)
 	}
-
-	tx.Commit()
 }
 
 func (h *Handler) HandleCommit(msg WithSig[Commit]) {
@@ -394,16 +395,11 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	}
 
 	// Check if commit is enough
-	h.checkPreparedAndCommitedLocalLock.Lock()
-	defer h.checkPreparedAndCommitedLocalLock.Unlock()
-	tx, err := h.DB.Begin()
-	if err != nil {
-		panic(err)
-	}
+	h.prepareAndCommitTableLock.Lock()
+	defer h.prepareAndCommitTableLock.Unlock()
 
-	rows, err := tx.Query("SELECT `commit_replicas`, `committed_local`, `prepared` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
+	rows, err := h.DB.Query("SELECT `commit_replicas`, `committed_local`, `prepared` FROM `prepares_with_commits` WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
 	if err != nil {
-		tx.Rollback()
 		panic(err)
 	}
 
@@ -413,7 +409,6 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	if rows.Next() {
 		err = rows.Scan(&cReplicasS, &committedLocal, &prepared)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 
@@ -421,9 +416,8 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	} else {
 		log.Printf("warning: commit no prepare: seq = %d\n", c.Seq)
 
-		_, err := tx.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", c.View, c.Seq, c.Digest, "", "", 0, h.DBSer(c), "", 0)
+		_, err := h.DB.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", c.View, c.Seq, c.Digest, "", "", 0, h.DBSer(c), "", 0)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 
@@ -438,9 +432,8 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 		cReplicas = []int{h.ID}
 		cReplicasS = joinIntToStr(cReplicas, ",")
 
-		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `commit` = ?, `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", h.DBSer(c), cReplicasS, c.View, c.Seq, c.Digest)
+		_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `commit` = ?, `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", h.DBSer(c), cReplicasS, c.View, c.Seq, c.Digest)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 	} else {
@@ -448,9 +441,8 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 			cReplicas = append(cReplicas, h.ID)
 			cReplicasS = joinIntToStr(cReplicas, ",")
 
-			_, err = tx.Exec("UPDATE `prepares_with_commits` SET `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", cReplicasS, c.View, c.Seq, c.Digest)
+			_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", cReplicasS, c.View, c.Seq, c.Digest)
 			if err != nil {
-				tx.Rollback()
 				panic(err)
 			}
 		}
@@ -458,37 +450,39 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 
 	// If committed-local
 	if len(cReplicas) >= 2*h.F+1 && committedLocal == 0 && prepared > 0 {
-		_, err = tx.Exec("UPDATE `prepares_with_commits` SET `committed_local` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
+		_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `committed_local` = 1 WHERE `view` = ? AND `seq` = ? AND `digest` = ?", c.View, c.Seq, c.Digest)
 		if err != nil {
-			tx.Rollback()
 			panic(err)
 		}
 
 		go h.OnCommittedLocal(c)
 	}
-
-	tx.Commit()
 }
 
 func (h *Handler) OnCommittedLocal(c Commit) {
 	// Fetch request for operation
+	h.requestTableLock.Lock()
 	rows, err := h.DB.Query("SELECT `request` FROM `requests` WHERE `digest` = ?", c.Digest)
 	if err != nil {
+		h.requestTableLock.Unlock()
 		panic(err)
 	}
 
 	if !rows.Next() {
 		log.Printf("error: commit request not found: seq = %d\n", c.Seq)
+		h.requestTableLock.Unlock()
 		return
 	}
 
 	var rB []byte
 	err = rows.Scan(&rB)
 	if err != nil {
+		h.requestTableLock.Unlock()
 		panic(err)
 	}
 
 	rows.Close()
+	h.requestTableLock.Unlock()
 
 	var r Request
 	h.DBDe(rB, &r)
@@ -603,20 +597,29 @@ func (h *Handler) OnCheckpointStable(ch Checkpoint) {
 	h.HLock.Unlock()
 
 	if h.EnableLogDiscard {
+		h.requestTableLock.Lock()
 		_, err := h.DB.Exec("DELETE FROM `requests` WHERE `seq` < ?", ch.Seq)
 		if err != nil {
+			h.requestTableLock.Unlock()
 			panic(err)
 		}
+		h.requestTableLock.Unlock()
 
+		h.preprepareTableLock.Lock()
 		_, err = h.DB.Exec("DELETE FROM `pre_prepares` WHERE `seq` < ?", ch.Seq)
 		if err != nil {
+			h.checkCheckpointLock.Unlock()
 			panic(err)
 		}
+		h.checkCheckpointLock.Unlock()
 
+		h.prepareAndCommitTableLock.Lock()
 		_, err = h.DB.Exec("DELETE FROM `prepares_with_commits` WHERE `seq` < ?", ch.Seq)
 		if err != nil {
+			h.prepareAndCommitTableLock.Unlock()
 			panic(err)
 		}
+		h.prepareAndCommitTableLock.Unlock()
 	}
 }
 
