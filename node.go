@@ -6,6 +6,7 @@
 package pbft
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -16,8 +17,8 @@ import (
 
 type NodeAPI interface {
 	HandleRequest(msgB []byte) error
-	// HandlePrePrepare parses msgPpB as preprepare & msgReqB as request
-	HandlePrePrepare(msgPpB []byte, msgReqB []byte) error
+	// HandlePrePrepare parses msgPPB as preprepare & msgReqB as request
+	HandlePrePrepare(msgPPB []byte, msgReqB []byte) error
 	HandlePrepare(msgB []byte) error
 	HandleCommit(msgB []byte) error
 }
@@ -147,11 +148,23 @@ func (nd *Node) HandleRequest(msgB []byte) error {
 	return nil
 }
 
-func (nd *Node) HandlePrePrepare(msgPpB []byte, msgReqB []byte) error {
+func (nd *Node) HandlePrePrepare(msgPPB []byte, msgReqB []byte) error {
+	nd.lock.Lock()
+	defer nd.lock.Unlock()
+
 	pp := &PrePrepare{}
-	err := proto.Unmarshal(msgPpB, pp)
+	err := proto.Unmarshal(msgPPB, pp)
 	if err != nil {
 		return err
+	}
+
+	ppSigDigest := hashMsgWithoutSig(pp)
+	ndPK, ok := nd.np.PKs[nd.np.ID]
+	if !ok {
+		return ErrUnknownNodeID
+	}
+	if !verifySig(ppSigDigest, pp.GetSig(), ndPK) {
+		return ErrInvalidSig
 	}
 
 	req := &Request{}
@@ -160,7 +173,64 @@ func (nd *Node) HandlePrePrepare(msgPpB []byte, msgReqB []byte) error {
 		return err
 	}
 
-	panic("not implemented") // TODO: Implement
+	reqSigDigest := hashMsgWithoutSig(req)
+	uPK, err := nd.nupg.Get(req.GetUser())
+	if err != nil {
+		return err
+	}
+	if !verifySig(reqSigDigest, req.GetSig(), uPK) {
+		return ErrInvalidSig
+	}
+
+	reqDigest := hash(msgReqB)
+	if !bytes.Equal(reqDigest, pp.GetDigest()) {
+		return ErrUnmatchedDigest
+	}
+
+	if pp.GetView() != int32(nd.view) {
+		return ErrUnmatchedView
+	}
+
+	// Check duplicated preprepare
+	prePPB, err := nd.ns.Get(fmt.Sprintf("preprepare/%d/%d", pp.GetView(), pp.GetSeq()))
+	if err != nil {
+		return err
+	}
+	if prePPB != nil {
+		if !bytes.Equal(prePPB, msgPPB) {
+			return ErrUnmatchedPP
+		}
+	} else {
+		err = nd.ns.Put(fmt.Sprintf("preprepare/%d/%d", pp.GetView(), pp.GetSeq()), msgPPB)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = nd.ns.Put(fmt.Sprintf("request/%s", hex.EncodeToString(reqDigest)), msgReqB)
+	if err != nil {
+		return err
+	}
+
+	p := &Prepare{
+		View:   pp.GetView(),
+		Seq:    pp.GetSeq(),
+		Digest: pp.GetDigest(),
+		Node:   nd.np.ID,
+	}
+	pSigDigest := hashMsgWithoutSig(p)
+	p.Sig = genSig(pSigDigest, nd.np.SK)
+	pB, err := proto.Marshal(p)
+	if err != nil {
+		return err
+	}
+
+	err = nd.nc.Broadcast(pB, nd.np.ID, msgTypePrepare)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (nd *Node) HandlePrepare(msgB []byte) error {
