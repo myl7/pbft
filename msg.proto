@@ -1,0 +1,48 @@
+// Copyright (C) 2022 myl7
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package msg;
+option go_package = "github.com/myl7/pbft";
+
+message Request {
+  bytes sig = 1;
+  // op may be large, so Request may be large too
+  bytes op = 2;
+  int64 timestamp = 3;
+  string user = 4;
+}
+
+message PrePrepare {
+  bytes sig = 1;
+  int32 view = 2;
+  int32 seq = 3;
+  bytes digest = 4;
+}
+
+message Prepare {
+  bytes sig = 1;
+  int32 view = 2;
+  int32 seq = 3;
+  bytes digest = 4;
+  string node = 5;
+}
+
+message Commit {
+  bytes sig = 1;
+  int32 view = 2;
+  int32 seq = 3;
+  bytes digest = 4;
+  string node = 5;
+}
+
+message Reply {
+  bytes sig = 1;
+  int32 view = 2;
+  int64 timestamp = 3;
+  string user = 4;
+  string node = 5;
+  // result may be large, so Reply may be large too
+  bytes result = 6;
+}
