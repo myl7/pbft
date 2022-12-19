@@ -17,14 +17,14 @@ message Request {
 message PrePrepare {
   bytes sig = 1;
   int32 view = 2;
-  int32 seq = 3;
+  int64 seq = 3;
   bytes digest = 4;
 }
 
 message Prepare {
   bytes sig = 1;
   int32 view = 2;
-  int32 seq = 3;
+  int64 seq = 3;
   bytes digest = 4;
   string node = 5;
 }
@@ -32,7 +32,7 @@ message Prepare {
 message Commit {
   bytes sig = 1;
   int32 view = 2;
-  int32 seq = 3;
+  int64 seq = 3;
   bytes digest = 4;
   string node = 5;
 }
