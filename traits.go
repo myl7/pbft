@@ -3,6 +3,10 @@
 
 package pbft
 
+import (
+	"encoding/json"
+)
+
 type NodeParams struct {
 	ID string
 	// N is total node num
@@ -37,6 +41,36 @@ type NodeStorage interface {
 	Put(key string, val []byte) error
 	// Get returns nil if not found
 	Get(key string) (val []byte, err error)
+}
+
+// nodeStorageSerde is used for (de)serializing objects for NodeStorage.
+// TODO: Currently it is not public. Maybe in the future we will extend NodeStorage to allow users to custom this.
+//
+//lint:ignore U1000 Reversed for public in the future if possible
+type nodeStorageSerde interface {
+	// Ser should not panic with rational input (e.g., JSON), otherwise may panic
+	Ser(obj any) []byte
+	// De should not panic with Ser output, otherwise may panic
+	De(b []byte, obj any)
+}
+
+var nodeStorageJSONSerde = nodeStorageJSONSerdeImpl{}
+
+type nodeStorageJSONSerdeImpl struct{}
+
+func (nodeStorageJSONSerdeImpl) Ser(obj any) []byte {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func (nodeStorageJSONSerdeImpl) De(b []byte, obj any) {
+	err := json.Unmarshal(b, obj)
+	if err != nil {
+		panic(err)
+	}
 }
 
 type NodeStateMachine interface {

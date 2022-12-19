@@ -40,3 +40,7 @@ func (x *Prepare) setSig(sig []byte) {
 func (x *Commit) setSig(sig []byte) {
 	x.Sig = sig
 }
+
+func (x *Reply) setSig(sig []byte) {
+	x.Sig = sig
+}

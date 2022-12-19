@@ -13,3 +13,4 @@ var ErrUnmatchedPP = errors.New("preprepare error: accepted 2 preprepares and th
 
 var ErrInvalidStorage = errors.New("invalid storage error: value is invalid and not put by the app")
 var ErrUnknownNodeID = errors.New("id error: can not use the ID to get the required information of the node")
+var ErrNoRequestAfterCommittedLocal = errors.New("request error: no request even after committed-local")

@@ -230,25 +230,158 @@ func (nd *Node) HandlePrePrepare(msgPPB []byte, msgReqB []byte) error {
 		return err
 	}
 
+	go nd.HandlePrepare(pB)
+
 	return nil
 }
 
 func (nd *Node) HandlePrepare(msgB []byte) error {
+	nd.lock.Lock()
+	defer nd.lock.Unlock()
+
 	p := &Prepare{}
 	err := proto.Unmarshal(msgB, p)
 	if err != nil {
 		return err
 	}
 
-	panic("not implemented") // TODO: Implement
+	pSigDigest := hashMsgWithoutSig(p)
+	ndPK, ok := nd.np.PKs[p.GetNode()]
+	if !ok {
+		return ErrUnknownNodeID
+	}
+	if !verifySig(pSigDigest, p.GetSig(), ndPK) {
+		return ErrInvalidSig
+	}
+
+	if p.GetView() != int32(nd.view) {
+		return ErrUnmatchedView
+	}
+
+	// Check prepare num
+	pNodes := make(map[string]bool)
+	pNodesB, err := nd.ns.Get(fmt.Sprintf("p-nodes/%d/%d/%s", p.GetView(), p.GetSeq(), hex.EncodeToString(p.GetDigest())))
+	if err != nil {
+		return err
+	}
+	if pNodesB != nil {
+		nodeStorageJSONSerde.De(pNodesB, &pNodes)
+	}
+
+	pNodes[p.GetNode()] = true
+
+	if len(pNodes) != 2*int((nd.np.N-1)/3) {
+		return nil
+	}
+	// If just prepared.
+	// TODO: In the edge case, the node may first get enough commits and committed-local, then get enough enough prepares and prepared. So we do also need to check commit num here. But that is too unrealistic so currently we just ignore it.
+
+	c := &Commit{
+		View:   p.GetView(),
+		Seq:    p.GetSeq(),
+		Digest: p.GetDigest(),
+		Node:   nd.np.ID,
+	}
+	cSigDigest := hashMsgWithoutSig(c)
+	c.Sig = genSig(cSigDigest, nd.np.SK)
+	cB, err := proto.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	err = nd.nc.Broadcast(cB, nd.np.ID, msgTypeCommit)
+	if err != nil {
+		return err
+	}
+
+	go nd.HandleCommit(cB)
+
+	return nil
 }
 
 func (nd *Node) HandleCommit(msgB []byte) error {
+	nd.lock.Lock()
+	defer nd.lock.Unlock()
+
 	c := &Commit{}
 	err := proto.Unmarshal(msgB, c)
 	if err != nil {
 		return err
 	}
 
-	panic("not implemented") // TODO: Implement
+	cSigDigest := hashMsgWithoutSig(c)
+	ndPK, ok := nd.np.PKs[c.GetNode()]
+	if !ok {
+		return ErrUnknownNodeID
+	}
+	if !verifySig(cSigDigest, c.GetSig(), ndPK) {
+		return ErrInvalidSig
+	}
+
+	if c.GetView() != int32(nd.view) {
+		return ErrUnmatchedView
+	}
+
+	// Check commit num
+	cNodes := make(map[string]bool)
+	cNodesB, err := nd.ns.Get(fmt.Sprintf("c-nodes/%d/%d/%s", c.GetView(), c.GetSeq(), hex.EncodeToString(c.GetDigest())))
+	if err != nil {
+		return err
+	}
+	if cNodesB != nil {
+		nodeStorageJSONSerde.De(cNodesB, &cNodes)
+	}
+
+	cNodes[c.GetNode()] = true
+
+	if len(cNodes) != 2*int((nd.np.N-1)/3)+1 {
+		return nil
+	}
+	// If just committed-local.
+	// TODO: Committed-local also needs to check prepared. But that seems not to happen usually, so we currently ignore it.
+
+	reqB, err := nd.ns.Get(fmt.Sprintf("request/%s", hex.EncodeToString(c.GetDigest())))
+	if err != nil {
+		return err
+	}
+	if reqB == nil {
+		// This should not happen
+		return ErrNoRequestAfterCommittedLocal
+	}
+
+	req := &Request{}
+	err = proto.Unmarshal(reqB, req)
+	if err != nil {
+		return err
+	}
+
+	// The computation may be slow
+	result := nd.nsm.Transform(req.GetOp())
+
+	rep := &Reply{
+		View:      c.GetView(),
+		Timestamp: req.GetTimestamp(),
+		User:      req.GetUser(),
+		Node:      nd.np.ID,
+		Result:    result,
+	}
+	repSigDigest := hashMsgWithoutSig(rep)
+	rep.Sig = genSig(repSigDigest, nd.np.SK)
+	repB, err := proto.Marshal(rep)
+	if err != nil {
+		return err
+	}
+
+	// Cache latest reply
+	err = nd.ns.Put(fmt.Sprintf("latest-rep/%s", req.GetUser()), repB)
+	if err != nil {
+		return err
+	}
+
+	err = nd.nc.Return(repB, req.GetUser())
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
