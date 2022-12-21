@@ -10,6 +10,7 @@ var ErrInvalidSig = errors.New("sig error: invalid signature")
 var ErrUnmatchedDigest = errors.New("digest error: the digest of the request is not matched with the digest in the preprepare")
 var ErrUnmatchedView = errors.New("view error: the view is not matched with the current node state")
 var ErrUnmatchedPP = errors.New("preprepare error: accepted 2 preprepares and the 2 do not match")
+var ErrUnknownUser = errors.New("user error: can not get the public key of the user due to unknown user")
 
 var ErrInvalidStorage = errors.New("invalid storage error: value is invalid and not put by the app")
 var ErrUnknownNodeID = errors.New("id error: can not use the ID to get the required information of the node")

@@ -34,10 +34,8 @@ func dePK(pk []byte) ed25519.PublicKey {
 	return pk
 }
 
-// serPK See [dePK]
-//
-//lint:ignore U1000 Will be used in initialization
-func serPK(pk ed25519.PublicKey) []byte {
+// SerPK See [dePK]
+func SerPK(pk ed25519.PublicKey) []byte {
 	return pk
 }
 
@@ -46,9 +44,7 @@ func deSK(sk []byte) ed25519.PrivateKey {
 	return sk
 }
 
-// serSK See [dePK]
-//
-//lint:ignore U1000 Will be used in initialization
-func serSK(sk ed25519.PrivateKey) []byte {
+// SerSK See [dePK]
+func SerSK(sk ed25519.PrivateKey) []byte {
 	return sk
 }

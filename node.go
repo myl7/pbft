@@ -98,13 +98,16 @@ func (nd *Node) HandleRequest(msgB []byte) error {
 		return err
 	}
 	if primary != nd.np.ID {
-		return nd.nc.Unicast(msgB, primary)
+		return nd.nc.Unicast(msgB, primary, msgTypeRequest)
 	}
 
 	reqSigDigest := hashMsgWithoutSig(req)
 	uPK, err := nd.nupg.Get(req.GetUser())
 	if err != nil {
 		return err
+	}
+	if uPK == nil {
+		return ErrUnknownUser
 	}
 	if !verifySig(reqSigDigest, req.GetSig(), uPK) {
 		return ErrInvalidSig
@@ -134,13 +137,7 @@ func (nd *Node) HandleRequest(msgB []byte) error {
 		return err
 	}
 
-	err = nd.nc.Broadcast(ppB, nd.np.ID, msgTypePrePrepare)
-	if err != nil {
-		return err
-	}
-
-	// TODO: Defer broadcasting of request, since it is large
-	err = nd.nc.Broadcast(msgB, nd.np.ID, msgTypeRequest)
+	err = nd.nc.BroadcastWithLarge(ppB, msgB, nd.np.ID, msgTypePrePrepare)
 	if err != nil {
 		return err
 	}
@@ -159,7 +156,11 @@ func (nd *Node) HandlePrePrepare(msgPPB []byte, msgReqB []byte) error {
 	}
 
 	ppSigDigest := hashMsgWithoutSig(pp)
-	ndPK, ok := nd.np.PKs[nd.np.ID]
+	primary, err := nd.npg.Get(int(pp.GetView()))
+	if err != nil {
+		return err
+	}
+	ndPK, ok := nd.np.PKs[primary]
 	if !ok {
 		return ErrUnknownNodeID
 	}
@@ -177,6 +178,9 @@ func (nd *Node) HandlePrePrepare(msgPPB []byte, msgReqB []byte) error {
 	uPK, err := nd.nupg.Get(req.GetUser())
 	if err != nil {
 		return err
+	}
+	if uPK == nil {
+		return ErrUnknownUser
 	}
 	if !verifySig(reqSigDigest, req.GetSig(), uPK) {
 		return ErrInvalidSig
@@ -271,6 +275,11 @@ func (nd *Node) HandlePrepare(msgB []byte) error {
 	pNodes[p.GetNode()] = true
 
 	if len(pNodes) != 2*int((nd.np.N-1)/3) {
+		newPNodesB := nodeStorageJSONSerde.Ser(pNodes)
+		err = nd.ns.Put(fmt.Sprintf("p-nodes/%d/%d/%s", p.GetView(), p.GetSeq(), hex.EncodeToString(p.GetDigest())), newPNodesB)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 	// If just prepared.
@@ -335,6 +344,11 @@ func (nd *Node) HandleCommit(msgB []byte) error {
 	cNodes[c.GetNode()] = true
 
 	if len(cNodes) != 2*int((nd.np.N-1)/3)+1 {
+		newCNodesB := nodeStorageJSONSerde.Ser(cNodes)
+		err = nd.ns.Put(fmt.Sprintf("c-nodes/%d/%d/%s", c.GetView(), c.GetSeq(), hex.EncodeToString(c.GetDigest())), newCNodesB)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 	// If just committed-local.

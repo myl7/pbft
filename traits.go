@@ -1,6 +1,7 @@
 // Copyright (C) 2022 myl7
 // SPDX-License-Identifier: Apache-2.0
 
+// All traits do not need inner locking, because in the node they are accessed in handlers, and handlers all have a mutex lock so that only one handler is running at a time
 package pbft
 
 import (
@@ -19,21 +20,26 @@ type NodeParams struct {
 
 // NodeCommunicator needs to handle stable transmission, e.g., retrying / timeouts
 type NodeCommunicator interface {
-	Unicast(msgB []byte, toNode string) error
-	// Broadcast has a msgType arg to differ large msgs, e.g., request & reply.
+	Unicast(msgB []byte, toNode string, msgType msgType) error
 	// Broadcast should not sends the msg to itself, as that has been done in this library.
 	Broadcast(msgB []byte, fromNode string, msgType msgType) error
+	// BroadcastWithLarge is similar to [Broadcast], but it sends a small msg msgB together with a large msg msgLB, e.g., a preprepare with a request.
+	// If you do not need the optimization, you can combine the two msgs and send them in one time.
+	BroadcastWithLarge(msgB []byte, msgLB []byte, fromNode string, msgType msgType) error
+	// Return can only send reply msg so no msgType is required
 	Return(msgB []byte, toUser string) error
 }
 
 type msgType int
 
 const (
-	// msgTypeRequest Request is broadcasted with preprepare in HandleRequest
+	// msgTypeRequest Notice this is only used to identify the request sent to HandleRequest.
+	// The request sent to HandlePrePrepare will still use msgTypePrePrepare.
 	msgTypeRequest msgType = iota
 	msgTypePrePrepare
 	msgTypePrepare
 	msgTypeCommit
+	msgTypeReply
 )
 
 // NodeStorage key of it use / to separate namespaces
