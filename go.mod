@@ -1,6 +1,7 @@
 module github.com/myl7/pbft
 
-go 1.19
+// For predeclared any
+go 1.18
 
 require (
 	golang.org/x/crypto v0.4.0
