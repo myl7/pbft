@@ -20,6 +20,5 @@ jobs:
         with:
           go-version: ${{ matrix.version }}
       - run: go version
-      - run: go generate
       - run: go run test/data/gen.go
       - run: go test -v
