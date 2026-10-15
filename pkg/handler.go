@@ -308,7 +308,7 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 
 		// Exclude duplicate replica
 		if indexOf(pReplicas, p.Replica) == -1 {
-			pReplicas = append(pReplicas, h.ID)
+			pReplicas = append(pReplicas, p.Replica)
 			pReplicasS = joinIntToStr(pReplicas, ",")
 
 			_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `prepare_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", pReplicasS, p.View, p.Seq, p.Digest)
@@ -317,7 +317,7 @@ func (h *Handler) HandlePrepare(msg WithSig[Prepare]) {
 			}
 		}
 	} else {
-		pReplicas = []int{h.ID}
+		pReplicas = []int{p.Replica}
 		pReplicaS := joinIntToStr(pReplicas, ",")
 
 		_, err = h.DB.Exec("INSERT INTO `prepares_with_commits` (`view`, `seq`, `digest`, `prepare`, `prepare_replicas`, `prepared`, `commit`, `commit_replicas`, `committed_local`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", p.View, p.Seq, p.Digest, h.DBSer(p), pReplicaS, 0, "", "", 0)
@@ -429,7 +429,7 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 	cReplicas := splitStrToInt(cReplicasS, ",")
 
 	if len(cReplicas) == 0 {
-		cReplicas = []int{h.ID}
+		cReplicas = []int{c.Replica}
 		cReplicasS = joinIntToStr(cReplicas, ",")
 
 		_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `commit` = ?, `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", h.DBSer(c), cReplicasS, c.View, c.Seq, c.Digest)
@@ -438,7 +438,7 @@ func (h *Handler) HandleCommit(msg WithSig[Commit]) {
 		}
 	} else {
 		if indexOf(cReplicas, c.Replica) == -1 {
-			cReplicas = append(cReplicas, h.ID)
+			cReplicas = append(cReplicas, c.Replica)
 			cReplicasS = joinIntToStr(cReplicas, ",")
 
 			_, err = h.DB.Exec("UPDATE `prepares_with_commits` SET `commit_replicas` = ? WHERE `view` = ? AND `seq` = ? AND `digest` = ?", cReplicasS, c.View, c.Seq, c.Digest)
