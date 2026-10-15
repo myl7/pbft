@@ -64,7 +64,6 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 		h.LastResultMapLock.Unlock()
 		return
 	}
-	h.LatestTimestampMap[r.Client] = r.Timestamp
 	h.LatestTimestampMapLock.Unlock()
 
 	// Check if sig is valid
@@ -75,6 +74,17 @@ func (h *Handler) HandleRequest(msg WithSig[Request]) {
 		log.Printf("error: request sig invalid when handling request: client = %s, err = %s\n", r.Client, err)
 		return
 	}
+
+	// Only authenticated requests may advance the timestamp. Another request
+	// may have completed verification while this request was being verified.
+	h.LatestTimestampMapLock.Lock()
+	latestTimestamp, ok = h.LatestTimestampMap[r.Client]
+	if ok && r.Timestamp <= latestTimestamp {
+		h.LatestTimestampMapLock.Unlock()
+		return
+	}
+	h.LatestTimestampMap[r.Client] = r.Timestamp
+	h.LatestTimestampMapLock.Unlock()
 
 	// Check if here is primary
 	h.ViewLock.RLock()
